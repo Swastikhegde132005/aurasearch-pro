@@ -1,0 +1,10 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+chroma_storage/
+.DS_Store
+Thumbs.db
+
+# ADD THIS LINE:
+.streamlit/secrets.toml
