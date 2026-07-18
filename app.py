@@ -2,328 +2,398 @@ import streamlit as st
 import pandas as pd
 import chromadb
 from sentence_transformers import SentenceTransformer
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from rank_bm25 import BM25Okapi
 import requests
+import io
 import os
 
-# 1. Force strict wide layout and load custom page configuration
+# ReportLab components for handling multi-page text wrapping safely
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+# 1. Page Configuration
 st.set_page_config(
-    page_title="AuraSearch PRO | Enterprise RAG Engine",
-    page_icon="⚡",
+    page_title="AuraSearch Ultra Pro | Next-Gen Book Vault",
+    page_icon="🪐",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 2. Secure Token Entry
-# Safe dynamic token loader
-try:
-    HF_TOKEN = st.secrets["HF_TOKEN"]
-except Exception:
-    HF_TOKEN = "YOUR_HUGGING_FACE_TOKEN_HERE"
+# Initialize Session State variables for layout and state tracking
+if "search_history" not in st.session_state:
+    st.session_state.search_history = []
+if "sidebar_recommendations" not in st.session_state:
+    st.session_state.sidebar_recommendations = []
+if "current_books_pool" not in st.session_state:
+    st.session_state.current_books_pool = []
+if "displayed_count" not in st.session_state:
+    st.session_state.displayed_count = 5
+if "active_query" not in st.session_state:
+    st.session_state.active_query = ""
+if "book_bookmarks" not in st.session_state:
+    st.session_state.book_bookmarks = []
 
-# 3. Premium CSS Overrides (Glassmorphism, Neon Highlights, Custom Typography)
+# 2. Premium UI Custom Styling (Glassmorphism & Neon Accent Layers)
 st.markdown("""
     <style>
-    /* Import modern, clean tech font */
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght=300;400;500;600;700;800&family=Space+Grotesk:wght=400;600;700&display=swap');
     
-    /* Apply base typography and background */
     html, body, [class*="st-emotion-cache"] {
         font-family: 'Plus Jakarta Sans', sans-serif !important;
-        background-color: #0B0F19 !important;
+        background-color: #080C14 !important;
         color: #E2E8F0 !important;
     }
     
-    /* Remove default Streamlit header bar decoration */
+    h1, h2, h3, .hero-title {
+        font-family: 'Space Grotesk', sans-serif !important;
+    }
+    
     header, [data-testid="stHeader"] {
-        background-color: rgba(11, 15, 25, 0.8) !important;
-        backdrop-filter: blur(12px) !important;
+        background-color: rgba(8, 12, 20, 0.8) !important;
+        backdrop-filter: blur(16px) !important;
     }
     
-    /* Sidebar Styling Override */
     section[data-testid="stSidebar"] {
-        background-color: #0F1524 !important;
-        border-right: 1px solid #1E293B !important;
+        background-color: #0D1322 !important;
+        border-right: 1px solid rgba(99, 102, 241, 0.15) !important;
     }
     
-    /* Sleek Title Header block */
-    .hero-container {
-        padding: 40px 0px 20px 0px;
-        text-align: left;
+    .hero-container { 
+        padding: 30px 25px; 
+        text-align: left; 
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.8) 100%);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 20px;
+        margin-bottom: 25px;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.3);
     }
     .hero-title {
-        font-size: 2.8rem !important;
+        font-size: 3.2rem !important;
         font-weight: 800 !important;
-        background: linear-gradient(135deg, #FFF 30%, #6366F1 100%);
+        background: linear-gradient(135deg, #FFFFFF 20%, #818CF8 60%, #6366F1 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         letter-spacing: -1px;
         margin-bottom: 5px;
     }
-    .hero-subtitle {
-        color: #94A3B8;
-        font-size: 1.1rem;
-        font-weight: 400;
-        margin-bottom: 25px;
-    }
+    .hero-subtitle { color: #94A3B8; font-size: 1.1rem; font-weight: 400; }
     
-    /* Custom CSS Search Button and Bar */
-    div.stButton > button:first-child {
-        background: linear-gradient(135deg, #6366F1 0%, #4F46E5 100%) !important;
+    div.stButton > button:first-child, div.stDownloadButton > button:first-child {
+        background: linear-gradient(135deg, #4F46E5 0%, #3730A3 100%) !important;
         color: #FFFFFF !important;
         font-weight: 600 !important;
-        font-size: 1rem !important;
-        border-radius: 10px !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(255,255,255,0.08) !important;
         padding: 12px 28px !important;
-        transition: all 0.3s ease !important;
-        box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3) !important;
+        transition: all 0.25s ease !important;
+        box-shadow: 0 4px 20px rgba(79, 70, 229, 0.25) !important;
+        font-size: 0.95rem !important;
     }
-    div.stButton > button:first-child:hover {
+    div.stButton > button:first-child:hover, div.stDownloadButton > button:first-child:hover {
         transform: translateY(-2px) !important;
-        box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5) !important;
-        border: 1px solid rgba(255,255,255,0.2) !important;
+        box-shadow: 0 6px 25px rgba(99, 102, 241, 0.4) !important;
+        border-color: rgba(255,255,255,0.2) !important;
     }
     
-    /* Premium Glassmorphic AI RAG Box */
-    .rag-box {
-        background: linear-gradient(135deg, rgba(30, 27, 75, 0.6) 0%, rgba(49, 16, 66, 0.6) 100%) !important;
-        backdrop-filter: blur(16px);
-        border: 1.5px solid rgba(99, 102, 241, 0.4) !important;
-        padding: 30px !important;
-        border-radius: 16px !important;
-        margin-bottom: 35px !important;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-        position: relative;
-        overflow: hidden;
-    }
-    .rag-box::before {
-        content: '';
-        position: absolute;
-        top: 0; left: 0; right: 0; height: 3px;
-        background: linear-gradient(90deg, #6366F1, #EC4899);
-    }
-    .rag-header {
-        font-size: 1.35rem !important;
-        font-weight: 700 !important;
-        color: #F8FAFC !important;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 15px;
-    }
-    .rag-content {
-        color: #E2E8F0 !important;
-        line-height: 1.7 !important;
-        font-size: 1.05rem !important;
-    }
-
-    /* Highly polished Glassmorphic Paper Cards */
-    .paper-card {
-        background: rgba(30, 41, 59, 0.45) !important;
-        backdrop-filter: blur(10px);
-        padding: 28px !important;
-        border-radius: 14px !important;
-        margin-bottom: 22px !important;
+    .book-display-card {
+        background: rgba(17, 24, 39, 0.7) !important;
         border: 1px solid rgba(255, 255, 255, 0.05) !important;
-        transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
-    }
-    .paper-card:hover {
-        transform: translateY(-4px) !important;
-        background: rgba(30, 41, 59, 0.65) !important;
-        border: 1px solid rgba(99, 102, 241, 0.25) !important;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25) !important;
-    }
-    .paper-title {
-        color: #FFFFFF !important;
-        font-size: 1.35rem !important;
-        font-weight: 700 !important;
-        line-height: 1.4;
-        margin-bottom: 12px;
-    }
-    .paper-abstract {
-        color: #94A3B8 !important;
-        font-size: 0.98rem !important;
-        line-height: 1.6 !important;
+        border-left: 5px solid #6366F1 !important;
+        padding: 28px !important;
+        border-radius: 16px !important;
+        margin-bottom: 25px !important;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(8px);
     }
     
-    /* Tech Badge for Retrieval Scores */
-    .score-badge {
-        display: inline-flex !important;
-        align-items: center;
-        background: rgba(16, 185, 129, 0.1) !important;
-        color: #34D399 !important;
-        border: 1px solid rgba(52, 211, 153, 0.2) !important;
-        padding: 5px 12px !important;
-        border-radius: 20px !important;
-        font-size: 0.8rem !important;
-        font-weight: 600 !important;
-        margin-top: 15px !important;
-        letter-spacing: 0.5px;
+    .sidebar-rec-card {
+        background: rgba(22, 30, 49, 0.8) !important;
+        border: 1px solid rgba(255, 255, 255, 0.04) !important;
+        border-left: 3px solid #F59E0B !important;
+        padding: 16px !important;
+        border-radius: 12px !important;
+        margin-bottom: 14px !important;
+    }
+    
+    .book-title { 
+        color: #FFFFFF !important; 
+        font-size: 1.6rem !important; 
+        font-weight: 700 !important; 
+        margin-bottom: 6px; 
+    }
+    
+    .book-meta {
+        color: #94A3B8 !important;
+        font-size: 0.95rem !important;
+        margin-bottom: 10px;
+    }
+    
+    .ui-badge-yellow {
+        display: inline-flex;
+        background: rgba(245, 158, 11, 0.12);
+        color: #F59E0B;
+        border: 1px solid rgba(245, 158, 11, 0.25);
+        padding: 4px 12px;
+        border-radius: 30px;
+        font-size: 0.8rem;
+        font-weight: 600;
+    }
+    
+    .ui-badge-blue {
+        display: inline-flex;
+        background: rgba(59, 130, 246, 0.12);
+        color: #3B82F6;
+        border: 1px solid rgba(59, 130, 246, 0.25);
+        padding: 4px 12px;
+        border-radius: 30px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-left: 8px;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# 4. Interactive Sidebar (Makes it feel like a real tool)
-with st.sidebar:
-    st.markdown("<h2 style='font-weight:800; color:#FFF; margin-bottom:5px;'>⚙️ Control Center</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='color:#64748B; font-size:0.85rem; margin-bottom:25px;'>System configuration and models</p>", unsafe_allow_html=True)
-    
-    st.markdown("### 🤖 Synthesis LLM")
-    st.info("Llama-3.1-8B-Instruct (Active)")
-    
-    st.markdown("### 🗄️ Vector Database")
-    st.success("ChromaDB Cluster Online")
-    
-    st.markdown("### 🛠️ Search Tuning")
-    top_k = st.slider("Top Documents (K-Matches)", min_value=2, max_value=5, value=3)
-    
-    st.markdown("---")
-    st.markdown("<p style='color:#475569; font-size:0.75rem;'>AuraSearch Pro v2.1 • Created for Professional Technical Portfolio</p>", unsafe_allow_html=True)
-
-# 5. Hero UI Section
-st.markdown("""
-    <div class="hero-container">
-        <h1 class="hero-title">⚡ AuraSearch PRO</h1>
-        <p class="hero-subtitle">Next-generation RAG Engine powered by Local Vector Embeddings & Llama 3.1 Synthesis</p>
-    </div>
-""", unsafe_allow_html=True)
-
-# 6. Database Loading & System Init
+# 3. System Initialization (FIXED FOR OFFLINE COMPATIBILITY)
 @st.cache_resource
 def initialize_system():
-    status = st.info("⏳ Initializing Local Vector Models... (Takes 30s on cold boot)")
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+    status = st.info("⏳ Bootstrapping Ultra-Engine Context Layers...")
+    
+    # Check if local model directory exists to bypass network calls
+    if os.path.exists("./local_model"):
+        model = SentenceTransformer('./local_model')
+    else:
+        # Fallback to online loading if local setup isn't done yet
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        
     status.empty()
     
     chroma_client = chromadb.PersistentClient(path="./chroma_storage")
-    collection = chroma_client.get_or_create_collection(name="arxiv_production")
-    
-    if not os.path.exists("arxiv_sample.csv"):
-        st.error("Error: 'arxiv_sample.csv' missing from project directory.")
-        st.stop()
-        
-    df = pd.read_csv("arxiv_sample.csv")
-    
-    if collection.count() == 0:
-        status = st.warning("⏳ Deep indexing 2,000 reference abstracts. Preparing cluster...")
-        documents = df['abstract'].fillna("").tolist()
-        metadatas = df[['title', 'id']].to_dict(orient='records')
-        ids = df['id'].astype(str).tolist()
-        
-        embeddings = model.encode(documents, show_progress_bar=True).tolist()
-        collection.add(embeddings=embeddings, documents=documents, metadatas=metadatas, ids=ids)
-        status.success("✅ Neural search index fully compiled!")
-        
+    collection = chroma_client.get_or_create_collection(name="clean_vault")
     return collection, model
 
-try:
-    collection, model = initialize_system()
-except Exception as e:
-    st.error(f"Failed to bootstrap database cluster: {e}")
-    st.stop()
+collection, model = initialize_system()
 
-# 7. Helper function for RAG Generation
-def generate_summary(query, papers):
-    if HF_TOKEN == "YOUR_HUGGING_FACE_TOKEN_HERE" or HF_TOKEN == "":
-        return "⚠️ Complete the token variable inside your Python code to authorize the LLM engine."
-        
-    api_url = "https://router.huggingface.co/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
+# 4. Multi-Page Full Text PDF Compiler Engine
+def compile_full_pdf(title, author, unbroken_text):
+    pdf_buffer = io.BytesIO()
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=54, leftMargin=54, topMargin=54, bottomMargin=54)
+    styles = getSampleStyleSheet()
     
-    context = "\n\n".join([f"Title: {p['title']}\nAbstract: {p['abstract']}" for p in papers])
+    title_style = ParagraphStyle('DocTitle', parent=styles['Heading1'], fontSize=22, leading=26, spaceAfter=6, textColor='#1E293B')
+    author_style = ParagraphStyle('DocAuthor', parent=styles['Normal'], fontSize=12, leading=16, spaceAfter=20, textColor='#4F46E5', fontName='Helvetica-Bold')
+    body_style = ParagraphStyle('DocBody', parent=styles['Normal'], fontSize=10, leading=15, spaceAfter=12, textColor='#334155')
     
-    payload = {
-        "model": "meta-llama/Llama-3.1-8B-Instruct",
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are an AI research assistant. Synthesize a highly technical, concise, 3-bullet-point summary explaining the core findings of the provided papers as they relate to the user's query. Do not write intros, outros, or meta-commentary."
-            },
-            {
-                "role": "user",
-                "content": f"User Query: {query}\n\nPapers:\n{context}"
-            }
-        ],
-        "max_tokens": 250
-    }
+    story = [Paragraph(title, title_style), Paragraph(f"Author: {author}", author_style), Spacer(1, 15)]
+    paragraphs = unbroken_text.split('\n\n')
     
-    response = requests.post(api_url, headers=headers, json=payload, timeout=10)
-    
+    for p in paragraphs:
+        clean_para = p.replace('\n', ' ').strip()
+        if clean_para:
+            clean_para = clean_para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            try: story.append(Paragraph(clean_para, body_style))
+            except Exception: continue
+                
+    doc.build(story)
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+# 5. Live Document Downloader
+def fetch_unabridged_book(query, limit=30):
+    safe_query = requests.utils.quote(query.strip())
+    search_url = f"https://gutendex.com/books/?search={safe_query}"
     try:
-        result = response.json()
-        if "choices" in result:
-            return result["choices"][0]["message"]["content"]
-        elif "error" in result:
-            return f"HuggingFace Router Error: {result['error']}"
-        return f"Unexpected API Response Structure: {result}"
-    except Exception as e:
-        return f"Could not generate neural summary: {e}"
+        response = requests.get(search_url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get('results', [])
+            if not results:
+                return []
+            
+            payloads = []
+            for book in results[:limit]:
+                title = book.get('title', 'Unknown Title')
+                authors = ", ".join([a.get('name', 'Unknown') for a in book.get('authors', [])])
+                formats = book.get('formats', {})
+                txt_url = formats.get('text/plain; charset=utf-8') or formats.get('text/plain')
+                
+                if txt_url:
+                    text_stream = requests.get(txt_url, timeout=15)
+                    if text_stream.status_code == 200:
+                        payloads.append({
+                            "title": title,
+                            "authors": authors,
+                            "full_text": text_stream.text,
+                            "subject": book.get('subjects', ['Literature'])[0] if book.get('subjects') else "Literature"
+                        })
+            return payloads
+    except Exception:
+        return []
+    return []
 
-# 8. User Input Bar Layout
-col1, col2 = st.columns([6, 1])
-with col1:
-    user_query = st.text_input("Query", placeholder="Search topics (e.g., 'object recognition in cameras', 'LLM reasoning bounds')...", label_visibility="collapsed")
-with col2:
-    search_button = st.button("Query Engine", use_container_width=True)
-
-# 9. Main Processing Thread
-if user_query or search_button:
-    if user_query.strip() == "":
-        st.warning("Please enter a conceptual query first.")
+# 6. High-Option Left Navigation Control Center & Amazon History Suggestions
+with st.sidebar:
+    st.markdown("<h2 style='color:#FFF; margin-bottom: 2px;'>⚙️ Control Desk</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#6366F1; font-size:0.85rem; margin-top:0px;'>Configure your vault environment</p>", unsafe_allow_html=True)
+    st.markdown("---")
+    
+    st.markdown("### 🎛️ Session Dashboard")
+    records_per_scroll = st.slider("Scroll Load Increment", min_value=3, max_value=15, value=5)
+    
+    st.markdown("### 🕒 Recent Searches")
+    if st.session_state.search_history:
+        for history_item in st.session_state.search_history[-4:]:
+            st.code(f"🔍 {history_item}")
+        if st.button("🧹 Clear Search Logs", use_container_width=True):
+            st.session_state.search_history = []
+            st.rerun()
     else:
-        # Step A: Local Semantic Search
-        query_vector = model.encode([user_query]).tolist()
-        results = collection.query(query_embeddings=query_vector, n_results=top_k)
+        st.caption("No queries tracked in this session yet.")
         
-        matched_papers = []
-        if results['documents'] and len(results['documents'][0]) > 0:
-            for i in range(len(results['documents'][0])):
-                matched_papers.append({
-                    "title": results['metadatas'][0][i]['title'],
-                    "abstract": results['documents'][0][i],
-                    "distance": results['distances'][0][i]
-                })
+    st.markdown("---")
+    
+    st.markdown("<h3 style='color:#FFF; margin-bottom:2px;'>🪐 Amazon Suggestions</h3>", unsafe_allow_html=True)
+    
+    if st.session_state.sidebar_recommendations:
+        for s_idx, rec_book in enumerate(st.session_state.sidebar_recommendations[:4]):
+            st.markdown(f"""
+                <div class="sidebar-rec-card">
+                    <div style="font-weight:700; color:#FFFFFF; font-size:0.95rem; line-height:1.2;">{rec_book['title']}</div>
+                    <div style="color:#94A3B8; font-size:0.8rem; margin-top:4px;">By {rec_book['authors']}</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            activate_side_comp = st.checkbox("Generate PDF payload", key=f"side_chk_{s_idx}")
+            if activate_side_comp:
+                with st.spinner("Building PDF..."):
+                    r_pdf = compile_full_pdf(rec_book['title'], rec_book['authors'], rec_book['full_text'])
+                st.download_button(
+                    label=f"📥 Save PDF", 
+                    data=r_pdf, 
+                    file_name=f"Suggested_{rec_book['title'].replace(' ','_')}.pdf", 
+                    key=f"side_pdf_{s_idx}",
+                    use_container_width=True
+                )
+            st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
+    else:
+        st.info("Personalized suggestions populate here based on search context.")
+
+# Main Presentation Panel Layout
+st.markdown("""
+    <div class="hero-container">
+        <h1 class="hero-title">🪐 AuraSearch Ultra Pro</h1>
+        <p class="hero-subtitle">Premium Discovery Engine with Interactive Sidebar Suggestions & On-Demand PDF Pipelines</p>
+    </div>
+""", unsafe_allow_html=True)
+
+# 7. Search Interface Core Layout
+col_input, col_btn = st.columns([6, 1])
+with col_input:
+    user_query = st.text_input("Query Bar", placeholder="Search for any book title, classic author, or conceptual subject...", label_visibility="collapsed")
+with col_btn:
+    search_button = st.button("Search Archive", use_container_width=True)
+
+if (user_query and user_query != st.session_state.active_query) or search_button:
+    if user_query.strip() == "":
+        st.warning("Please submit a search prompt.")
+    else:
+        st.session_state.active_query = user_query.strip()
+        st.session_state.displayed_count = records_per_scroll
+        st.session_state.current_books_pool = []
         
-        if matched_papers:
-            # Step B: Display RAG Synthesis
-            st.markdown("<h3 style='margin-top: 30px; font-weight:700; color:#F1F5F9;'>🤖 AI Abstract Synthesis (RAG)</h3>", unsafe_allow_html=True)
+        if user_query.strip() not in st.session_state.search_history:
+            st.session_state.search_history.append(user_query.strip())
+
+        with st.status("🌐 Traversing Network Hubs & Constructing Secure Tokens...", expanded=True) as status:
+            books_pool = fetch_unabridged_book(st.session_state.active_query, limit=30)
             
-            with st.spinner("Streaming summary tokens from Meta Llama 3.1..."):
-                try:
-                    summary = generate_summary(user_query, matched_papers)
-                    if "HuggingFace Router Error" in summary or "Unexpected" in summary:
-                        st.error(summary)
-                    else:
-                        st.markdown(f"""
-                            <div class="rag-box">
-                                <div class="rag-header">
-                                    <span>🧠</span> Contextual Insight Synthesis
-                                </div>
-                                <div class="rag-content">
-                                    {summary}
-                                </div>
-                            </div>
-                        """, unsafe_allow_html=True)
-                except requests.exceptions.ConnectionError:
-                    st.warning("📡 **Offline Mode Activated**: Host network is blocking the external LLM router. Presenting retrieved papers directly from local index below.")
-                except Exception as e:
-                    st.error(f"Synthesizer encountered a network error: {e}")
+            if books_pool:
+                st.session_state.current_books_pool = books_pool
+                st.session_state.sidebar_recommendations = fetch_unabridged_book(books_pool[0]['subject'], limit=4)
+                status.update(label="🚀 Data channels connected! Review results below.", state="complete")
+            else:
+                status.update(label="⚠️ Free collection matches are currently unavailable.", state="error")
+
+# Step B: Render matches smoothly from session data streams
+if st.session_state.current_books_pool:
+    st.markdown(f"### 📂 Available Channels (Displaying top {min(st.session_state.displayed_count, len(st.session_state.current_books_pool))} matches)")
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.05);' />", unsafe_allow_html=True)
+    
+    visible_subset = st.session_state.current_books_pool[:st.session_state.displayed_count]
+    
+    for idx, book in enumerate(visible_subset):
+        encoded_title = requests.utils.quote(book['title'])
+        amazon_url = f"https://www.amazon.com/s?k={encoded_title}+book"
+        google_play_url = f"https://books.google.com/books?q={encoded_title}"
+        
+        st.markdown(f"""
+            <div class="book-display-card">
+                <div class="book-title">📖 {book['title']}</div>
+                <div class="book-meta">✍ Author/Compiler: <b>{book['authors']}</b></div>
+                <span class="ui-badge-yellow">Category: {book['subject']}</span>
+                <span class="ui-badge-blue">Source Link Verified</span>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([2.5, 2.5, 2.5, 1.5])
+        
+        with btn_col1:
+            wants_pdf = st.checkbox("⚙️ Generate PDF Payload", key=f"chk_{idx}")
+            if wants_pdf:
+                with st.spinner("Assembling PDF matrix..."):
+                    full_pdf_binary = compile_full_pdf(book['title'], book['authors'], book['full_text'])
+                st.download_button(
+                    label="📥 Download Full PDF",
+                    data=full_pdf_binary,
+                    file_name=f"{book['title'].replace(' ', '_')}_Unabridged.pdf",
+                    mime="application/pdf",
+                    key=f"manual_pdf_{idx}",
+                    use_container_width=True
+                )
             
-            # Step C: List the Papers
-            st.markdown("<h3 style='margin-top:20px; font-weight:700; color:#F1F5F9;'>📂 Retrieved Reference Source Papers</h3>", unsafe_allow_html=True)
-            st.markdown("<hr style='border-color: #1E293B; margin-bottom: 25px;' />", unsafe_allow_html=True)
+        with btn_col2:
+            st.markdown(f'<a href="{amazon_url}" target="_blank"><button style="background: linear-gradient(135deg, #FF9900 0%, #E67E22 100%); color:black; border:none; padding:10px 14px; border-radius:10px; font-weight:700; cursor:pointer; height:42px; width:100%;">🛒 Buy on Amazon</button></a>', unsafe_allow_html=True)
             
-            for paper in matched_papers:
-                confidence = int(100 / (1 + paper['distance']))
-                st.markdown(f"""
-                    <div class="paper-card">
-                        <div class="paper-title">{paper['title']}</div>
-                        <div class="paper-abstract">{paper['abstract']}</div>
-                        <div class="score-badge">🔍 Match Confidence: {confidence}%</div>
-                    </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No matching abstracts found inside the vector space database.")
+        with btn_col3:
+            st.markdown(f'<a href="{google_play_url}" target="_blank"><button style="background: linear-gradient(135deg, #34A853 0%, #27AE60 100%); color:white; border:none; padding:10px 14px; border-radius:10px; font-weight:600; cursor:pointer; height:42px; width:100%;">🌐 Find on Google Books</button></a>', unsafe_allow_html=True)
+            
+        with btn_col4:
+            is_bookmarked = book['title'] in st.session_state.book_bookmarks
+            bookmark_label = "❤️ Saved" if is_bookmarked else "🖤 Favorite"
+            if st.button(bookmark_label, key=f"fav_{idx}", use_container_width=True):
+                if not is_bookmarked:
+                    st.session_state.book_bookmarks.append(book['title'])
+                    st.toast(f"Saved: {book['title']} added to your list!")
+                    st.rerun()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    if st.session_state.displayed_count < len(st.session_state.current_books_pool):
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔽 Load More Results (Continuous Amazon Scroll)", use_container_width=True):
+            st.session_state.displayed_count += records_per_scroll
+            st.rerun()
+    else:
+        st.info("🏁 Master collection index search complete.")
+
+elif user_query and not st.session_state.current_books_pool:
+    st.markdown(f"### 🛒 Authorized Commercial Outlets")
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.05);' />", unsafe_allow_html=True)
+    
+    encoded_query = requests.utils.quote(user_query)
+    fallback_amazon = f"https://www.amazon.com/s?k={encoded_query}+book"
+    fallback_google = f"https://books.google.com/books?q={encoded_query}"
+    
+    st.markdown(f"""
+        <div class="book-display-card" style="border-left: 5px solid #EF4444 !important;">
+            <div class="book-title" style="color:#EF4444 !important;">🔒 Secure Licensing Verification Required</div>
+            <p style="color:#94A3B8; font-size:0.95rem;">'{user_query}' requires an official publisher license. You can acquire a permanent copy or access cloud library reading panels via these certified vendors:</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    f_col1, f_col2 = st.columns([1, 1])
+    with f_col1:
+        st.markdown(f'<a href="{fallback_amazon}" target="_blank"><button style="background: linear-gradient(135deg, #FF9900 0%, #E67E22 100%); color:black; border:none; padding:12px 20px; border-radius:10px; font-weight:700; cursor:pointer; width:100%;">🛒 Search Amazon Storefront</button></a>', unsafe_allow_html=True)
+    with f_col2:
+        st.markdown(f'<a href="{fallback_google}" target="_blank"><button style="background: linear-gradient(135deg, #34A853 0%, #27AE60 100%); color:white; border:none; padding:12px 20px; border-radius:10px; font-weight:600; cursor:pointer; width:100%;">🌐 Open Google Books Store</button></a>', unsafe_allow_html=True)
